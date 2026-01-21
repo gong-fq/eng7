@@ -1,10 +1,11 @@
 const https = require('https');
 
 exports.handler = async function(event, context) {
-  console.log('收到请求:', event.httpMethod);
+  console.log('=== 函数调用开始 ===');
   
   // 处理OPTIONS预检请求
   if (event.httpMethod === 'OPTIONS') {
+    console.log('处理OPTIONS请求');
     return {
       statusCode: 200,
       headers: {
@@ -18,6 +19,7 @@ exports.handler = async function(event, context) {
   
   // 只接受POST请求
   if (event.httpMethod !== 'POST') {
+    console.log('不接受的方法:', event.httpMethod);
     return {
       statusCode: 405,
       headers: {
@@ -32,11 +34,14 @@ exports.handler = async function(event, context) {
   }
   
   try {
+    console.log('解析请求体...');
+    
     // 解析请求体
     let body;
     try {
       body = JSON.parse(event.body || '{}');
     } catch (e) {
+      console.error('JSON解析错误:', e.message);
       return {
         statusCode: 400,
         headers: {
@@ -53,6 +58,7 @@ exports.handler = async function(event, context) {
     const { message } = body;
     
     if (!message || message.trim() === '') {
+      console.log('消息为空');
       return {
         statusCode: 400,
         headers: {
@@ -66,13 +72,13 @@ exports.handler = async function(event, context) {
       };
     }
     
-    console.log('处理消息:', message.substring(0, 50) + '...');
+    console.log('收到消息:', message.substring(0, 100) + (message.length > 100 ? '...' : ''));
     
-    // 从环境变量获取API密钥（安全！）
+    // 从环境变量获取API密钥
     const apiKey = process.env.DEEPSEEK_API_KEY;
     
     if (!apiKey) {
-      console.error('DEEPSEEK_API_KEY环境变量未设置');
+      console.error('❌ DEEPSEEK_API_KEY环境变量未设置');
       return {
         statusCode: 500,
         headers: {
@@ -82,15 +88,22 @@ exports.handler = async function(event, context) {
         body: JSON.stringify({ 
           success: false,
           error: '服务器配置错误',
-          message: '请设置DEEPSEEK_API_KEY环境变量'
+          message: 'DEEPSEEK_API_KEY环境变量未设置。请在Netlify环境变量中设置。'
         })
       };
     }
     
-    console.log('API密钥已获取，长度:', apiKey.length);
+    console.log('✅ API密钥已获取，长度:', apiKey.length);
+    
+    // 测试API密钥格式
+    if (!apiKey.startsWith('sk-')) {
+      console.error('❌ API密钥格式可能不正确');
+    }
     
     // 调用DeepSeek API
+    console.log('正在调用DeepSeek API...');
     const deepseekResponse = await callDeepSeekAPI(apiKey, message);
+    console.log('✅ DeepSeek API调用成功');
     
     return {
       statusCode: 200,
@@ -102,7 +115,22 @@ exports.handler = async function(event, context) {
     };
     
   } catch (error) {
-    console.error('处理请求时出错:', error);
+    console.error('❌ 函数执行错误:', error.message);
+    console.error('错误堆栈:', error.stack);
+    
+    // 根据错误类型返回不同的信息
+    let userMessage = '服务器内部错误';
+    let details = error.message;
+    
+    if (error.message.includes('401')) {
+      userMessage = 'API密钥无效或已过期';
+    } else if (error.message.includes('429')) {
+      userMessage = 'API调用频率超限';
+    } else if (error.message.includes('timeout')) {
+      userMessage = '请求超时，请稍后重试';
+    } else if (error.message.includes('ENOTFOUND')) {
+      userMessage = '无法连接到API服务器';
+    }
     
     return {
       statusCode: 500,
@@ -112,41 +140,38 @@ exports.handler = async function(event, context) {
       },
       body: JSON.stringify({
         success: false,
-        error: '服务器内部错误',
-        details: error.message
+        error: userMessage,
+        details: details,
+        help: '请检查API密钥和网络连接'
       })
     };
   }
 };
 
-// 调用DeepSeek API
+// 调用DeepSeek API的辅助函数
 function callDeepSeekAPI(apiKey, userMessage) {
   return new Promise((resolve, reject) => {
-    const systemPrompt = `你是专业的英语AI教师助手。用户只能用英文向你提问。你的任务是：
-
-1. 提供详细、有帮助的英语学习内容
-2. 给出具体例句和使用场景
-3. 提供完整的中文翻译
-4. 鼓励和教育性的语气
-5. 回复要全面但简洁
-
-请按以下格式回复：
-[英文回复内容，包含详细解释和例句]
-
-然后在最后添加：
-<div class="translation">[对应的中文翻译]</div>`;
-
+    const systemPrompt = `你是专业的英语AI教师助手。请用中英双语回复。用户用英文提问时，先用英文详细回答，然后提供中文翻译。`;
+    
     const postData = JSON.stringify({
       model: "deepseek-chat",
       messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
+        { 
+          role: "system", 
+          content: systemPrompt 
+        },
+        { 
+          role: "user", 
+          content: userMessage 
+        }
       ],
-      max_tokens: 1000,
+      max_tokens: 800,
       temperature: 0.7,
       stream: false
     });
 
+    console.log('请求数据大小:', Buffer.byteLength(postData), '字节');
+    
     const options = {
       hostname: 'api.deepseek.com',
       port: 443,
@@ -155,50 +180,75 @@ function callDeepSeekAPI(apiKey, userMessage) {
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'application/json',
         'Content-Length': Buffer.byteLength(postData)
       },
-      timeout: 30000
+      timeout: 25000 // 25秒超时
     };
 
+    console.log('发送HTTPS请求到DeepSeek API...');
+    
     const req = https.request(options, (res) => {
+      console.log('DeepSeek API响应状态:', res.statusCode);
+      
       let data = '';
+      let responseSize = 0;
 
       res.on('data', (chunk) => {
         data += chunk;
+        responseSize += chunk.length;
       });
 
       res.on('end', () => {
+        console.log('收到响应，大小:', responseSize, '字节');
+        
         try {
           if (res.statusCode !== 200) {
-            console.error('DeepSeek API错误:', res.statusCode, data);
-            reject(new Error(`DeepSeek API返回状态 ${res.statusCode}`));
+            console.error('DeepSeek API错误状态:', res.statusCode);
+            console.error('错误响应:', data.substring(0, 500));
+            
+            let errorMsg = `DeepSeek API返回状态 ${res.statusCode}`;
+            try {
+              const errorJson = JSON.parse(data);
+              if (errorJson.error && errorJson.error.message) {
+                errorMsg = errorJson.error.message;
+              }
+            } catch (e) {
+              // 忽略解析错误
+            }
+            
+            reject(new Error(errorMsg));
             return;
           }
           
+          console.log('解析API响应...');
           const jsonData = JSON.parse(data);
           
           if (!jsonData.choices || !jsonData.choices[0] || !jsonData.choices[0].message) {
-            reject(new Error('DeepSeek API返回格式异常'));
+            console.error('无效的API响应格式:', jsonData);
+            reject(new Error('DeepSeek API返回了无效的响应格式'));
             return;
           }
           
           const aiContent = jsonData.choices[0].message.content;
+          console.log('AI回复长度:', aiContent.length);
           
-          // 提取翻译
+          // 简单处理响应
           let englishPart = aiContent;
           let chinesePart = "中文翻译";
           
-          if (aiContent.includes('<div class="translation">')) {
-            const parts = aiContent.split('<div class="translation">');
-            englishPart = parts[0].trim();
-            chinesePart = parts[1].replace('</div>', '').trim();
+          // 尝试提取中文部分
+          const chineseMatch = aiContent.match(/[\u4e00-\u9fa5][\u4e00-\u9fa5\s，。！？、：；""''（）《》【】]*$/);
+          if (chineseMatch) {
+            englishPart = aiContent.substring(0, chineseMatch.index).trim();
+            chinesePart = chineseMatch[0].trim();
           } else {
-            const lines = aiContent.split('\n');
-            if (lines.length > 1) {
-              englishPart = lines.slice(0, -1).join('\n').trim();
-              chinesePart = lines[lines.length - 1].trim();
-            }
+            // 如果没有明显的中文部分，使用整个内容
+            englishPart = aiContent;
+            chinesePart = "请参考上面的英文解释";
           }
+          
+          console.log('✅ 成功处理响应');
           
           resolve({
             success: true,
@@ -207,23 +257,25 @@ function callDeepSeekAPI(apiKey, userMessage) {
           });
           
         } catch (parseError) {
-          console.error('解析DeepSeek响应失败:', parseError);
-          reject(new Error('解析API响应失败'));
+          console.error('解析响应失败:', parseError.message);
+          console.error('原始响应:', data.substring(0, 500));
+          reject(new Error(`解析API响应失败: ${parseError.message}`));
         }
       });
     });
 
     req.on('error', (error) => {
-      console.error('HTTP请求失败:', error);
-      reject(new Error(`HTTP请求失败: ${error.message}`));
+      console.error('HTTPS请求错误:', error.message);
+      reject(new Error(`网络请求失败: ${error.message}`));
     });
 
     req.on('timeout', () => {
       console.error('请求超时');
       req.destroy();
-      reject(new Error('请求超时'));
+      reject(new Error('请求超时，请稍后重试'));
     });
 
+    // 发送请求
     req.write(postData);
     req.end();
   });
