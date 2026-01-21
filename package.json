@@ -1,0 +1,12 @@
+{
+  "name": "english-learning-app",
+  "version": "1.0.0",
+  "description": "英语学习应用",
+  "main": "index.html",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  }
+}
